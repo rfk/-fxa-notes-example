@@ -1,0 +1,210 @@
+<html>
+<head>
+<script src="http://code.jquery.com/jquery-3.2.1.min.js"
+        integrity="sha256-hwg4gsxgFZhOsEEamdOYGBf13FyQuiTwlAQgxVSNgt4="
+        crossorigin="anonymous"></script>
+<script type="text/javascript">
+
+//var ACCOUNT_SERVER = "https://scoped-keys.dev.lcip.org/"
+const AUTHORIZATION_ENDPOINT = "https://oauth-scoped-keys.dev.lcip.org/v1/authorization"
+const TOKEN_ENDPOINT = "https://oauth-scoped-keys.dev.lcip.org/v1/token"
+
+const CLIENT_ID = "c6d74070a481bc10"
+const SCOPES = "profile https://identity.mozilla.org/apps/notes"
+
+const ECDH_PARAMS = {
+  name: "ECDH",
+  namedCurve: "P-256",
+}
+
+const AES_PARAMS = {
+  name: "AES-GCM",
+  length: 256
+}
+
+
+$(function() {
+  Promise.resolve(null).then(function () {
+    if (! window.location.search) {
+      return beginOAuthFlow()
+    } else {
+      return completeOAuthFlow()
+    }
+  }).catch(function (err) {
+    console.log("ERROR!", err)
+  })
+})
+
+
+function beginOAuthFlow() {
+  let state = randomString(16)
+  let codeVerifier = randomString(32)
+  return generateEphemeralKeypair().then(function(keypair) {
+    return sha256(codeVerifier).then(function(codeChallenge) {
+      localStorage["inflight-oauth-state"] = JSON.stringify({
+        state: state,
+        codeVerifier: codeVerifier,
+        privateJWK: keypair.privateJWK
+      })
+      window.location = AUTHORIZATION_ENDPOINT + "?" + [
+        "client_id=" + CLIENT_ID,
+        "scope=" + escape(SCOPES),
+        "state=" + state,
+        "code_challenge=" + b64Encode(codeChallenge),
+        "code_challenge_method=S256",
+        "keys_jwk=" + b64Encode(JSON.stringify(keypair.publicJWK))
+      ].join("&")
+    })
+  })
+}
+
+
+function completeOAuthFlow() {
+  // Parse incoming parameters.
+  let params = {}
+  window.location.search.substr(1).split("&").forEach(function (param) {
+    let bits = param.split("=")
+    params[bits[0]] = bits[1]
+  })
+  if (! params.state) { throw new Error("missing 'state' parameter") }
+  if (! params.code) { throw new Error("missing 'code' parameter") }
+
+  // Validate returned info against saved info from when we started the dance.
+  let savedState = localStorage["inflight-oauth-state"]
+  if (! savedState) { throw new Error("missing saved oauth state") }
+  savedState = JSON.parse(savedState)
+  if (savedState.state !== params.state) { throw new Error("invalid 'state' parameter") }
+
+  // Exchange the authorization code for a token and keys bundle.
+  return $.post(TOKEN_ENDPOINT, {
+    client_id: CLIENT_ID,
+    grant_type: 'authorization_code',
+    code: params.code,
+    code_verifier: savedState.codeVerifier
+  }).then(function(resp) {
+    let accessToken = resp.access_token
+    let keysJWE = resp.derivedKeyBundle // XXX TODO: in the draft spec this is called "keys_jwe"
+    return decryptJWE(savedState.privateJWK, keysJWE)
+  }).then(function(plaintext) {
+    alert(plaintext)
+  })
+}
+
+
+function generateEphemeralKeypair() {
+  return crypto.subtle.generateKey(ECDH_PARAMS, true, ["deriveKey"]).then(function(keypair) {
+    return crypto.subtle.exportKey("jwk", keypair.publicKey).then(function(publicJWK) {
+      return crypto.subtle.exportKey("jwk", keypair.privateKey).then(function(privateJWK) {
+        return {
+          publicJWK: publicJWK,
+          privateJWK: privateJWK
+        }
+      })
+    })
+  })
+}
+
+
+function decryptJWE(privateJWK, jwe) {
+  jwe = parseJWE(jwe)
+  if (jwe.header.alg !== 'ECDH-ES') { throw new Error('unexpected jwe alg') }
+  if (jwe.header.enc !== 'A256GCM') { throw new Error('unexpected jwe alg') }
+  if (jwe.header.epk.kty !== 'EC') { throw new Error('unexpected jwe epk.kty') }
+  if (jwe.header.epk.crv !== 'P-256') { throw new Error('unexpected jwe epk.crv') }
+  return crypto.subtle.importKey("jwk", privateJWK, ECDH_PARAMS, false, ["deriveKey"]).then(function(privateKey) {
+    return crypto.subtle.importKey("jwk", jwe.header.epk, ECDH_PARAMS, false, ["deriveKey"]).then(function(ephemeralKey) {
+      var params = Object.assign({}, ECDH_PARAMS, { public: ephemeralKey })
+      return crypto.subtle.deriveKey(params, privateKey, AES_PARAMS, true, ["decrypt"]).then(function(sharedKey) {
+        return crypto.subtle.exportKey("raw", sharedKey).then(function(sharedKeyBytes) {
+          sharedKeyBytes = new Uint8Array(sharedKeyBytes); 
+          return deriveECDHAESKey(sharedKeyBytes)
+        })
+      }).then(function (derivedKeyBytes) {
+        return crypto.subtle.importKey("raw", derivedKeyBytes, AES_PARAMS, false, ["decrypt"])
+      }).then(function (derivedKey) {
+        return crypto.subtle.decrypt({
+          name: "AES-GCM",
+          iv: jwe.iv,
+          additionalData: jwe.protected,
+          tagLength: 128
+        }, derivedKey, jwe.ciphertext).then(function(plaintext) {
+          return buf2str(new Uint8Array(plaintext))
+        })
+      })
+    })
+  })
+}
+
+
+function parseJWE(jwe) {
+  let jweParts = jwe.split(".")
+  if (jweParts.length !== 5) { throw new Error('invalid JWE') }
+  return {
+    protected: str2buf(jweParts[0]),
+    header: JSON.parse(b64Decode(jweParts[0])),
+    contentKey: str2buf(b64Decode(jweParts[1])),
+    iv: str2buf(b64Decode(jweParts[2])),
+    ciphertext: str2buf(b64Decode(jweParts[3]) + b64Decode(jweParts[4])),
+    tag: str2buf(b64Decode(jweParts[4]))
+  }
+}
+
+
+function deriveECDHAESKey(sharedKeyBytes) {
+  var info = [
+    "\x00\x00\x00\x07A256GCM", // 7-byte algorithm identifier
+    "\x00\x00\x00\x00",  // empty PartyUInfo
+    "\x00\x00\x00\x00",  // empty PartyVInfo
+    "\x00\x00\x01\x00"   // keylen == 256
+  ].join("")
+  return sha256("\x00\x00\x00\x01" + buf2str(sharedKeyBytes) + info)
+}
+
+
+function randomString(len) {
+  let buf = new Uint8Array(len)
+  return b64Encode(crypto.getRandomValues(buf)).substr(0, len)
+}
+
+
+function b64Encode(str) {
+  if (typeof str !== 'string') {
+    str = buf2str(str)
+  }
+  return btoa(str)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=/g, "")
+}
+
+
+function b64Decode(str) {
+  if (typeof str !== 'string') {
+    str = buf2str(str)
+  }
+  return atob(str.replace(/-/g, "+").replace(/_/g, "/"))
+}
+
+
+function sha256(buf) {
+  if (typeof buf === 'string') {
+    buf = str2buf(buf)
+  }
+  return crypto.subtle.digest({ name: "SHA-256" }, buf).then(function(hash) {
+    return new Uint8Array(hash)
+  })
+}
+
+function str2buf(str) {
+  return Uint8Array.from(Array.prototype.map.call(str, function (c) { return c.charCodeAt(0) }))
+}
+
+function buf2str(buf) {
+  return String.fromCharCode.apply(null, buf)
+}
+</script>
+</head>
+<body>
+Fetching your Notes keys...
+</body>
+</html>

@@ -12,20 +12,23 @@
 const AUTHORIZATION_ENDPOINT = "https://oauth-scoped-keys.dev.lcip.org/v1/authorization"
 const TOKEN_ENDPOINT = "https://oauth-scoped-keys.dev.lcip.org/v1/token"
 
-const CLIENT_ID = "c6d74070a481bc10"
+const CLIENT_ID = "82fdfa37698f256c"
 const SCOPES = "profile https://identity.mozilla.org/apps/notes"
 
 
 $(function() {
-  Promise.resolve(null).then(function () {
-    if (! window.location.search) {
-      return beginOAuthFlow()
-    } else {
-      return completeOAuthFlow()
-    }
-  }).catch(function (err) {
-    console.log("ERROR!", err)
+  $("#go-button").on("click", function () {
+    beginOAuthFlow().catch(function (err) {
+      $("#result").text("ERR! " + JSON.stringify(err))
+    })
   })
+  if (window.location.search) {
+    completeOAuthFlow().then(function (res) {
+      $("#result").text(JSON.stringify(res))
+    }).catch(function (err) {
+      $("#result").text("ERR! " + JSON.stringify(err))
+    })
+  }
 })
 
 
@@ -77,9 +80,12 @@ function completeOAuthFlow() {
   }).then(function(resp) {
     let accessToken = resp.access_token
     let keysJWE = resp.derivedKeyBundle // XXX TODO: in the draft spec this is called "keys_jwe"
-    return decryptJWE(savedState.privateJWK, keysJWE)
-  }).then(function(plaintext) {
-    alert(plaintext)
+    return decryptJWE(savedState.privateJWK, keysJWE).then(function(plaintext) {
+      return {
+        access_token: accessToken,
+        keys: JSON.parse(plaintext)
+      }
+    })
   })
 }
 
@@ -236,6 +242,7 @@ function buf2str(buf) {
 </script>
 </head>
 <body>
-Fetching your Notes keys...
+<input type="button" id="go-button" value="Fetch Encryption Keys for Notes" />
+<div id="result"></div>
 </body>
 </html>

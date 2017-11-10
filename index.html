@@ -9,8 +9,8 @@
 // the FxA .well-known/openid-configuration file is not readable
 // cross-origin: https://github.com/mozilla/fxa-content-server/issues/5453
 //var ACCOUNT_SERVER = "https://scoped-keys.dev.lcip.org/"
-const AUTHORIZATION_ENDPOINT = "https://oauth-scoped-keys.dev.lcip.org/v1/authorization"
-const TOKEN_ENDPOINT = "https://oauth-scoped-keys.dev.lcip.org/v1/token"
+const AUTHORIZATION_ENDPOINT = "https://oauth-scoped-keys-oct10.dev.lcip.org/v1/authorization"
+const TOKEN_ENDPOINT = "https://oauth-scoped-keys-oct10.dev.lcip.org/v1/token"
 
 const CLIENT_ID = "82fdfa37698f256c"
 const SCOPES = "profile https://identity.mozilla.org/apps/notes"
@@ -79,7 +79,7 @@ function completeOAuthFlow() {
     code_verifier: savedState.codeVerifier
   }).then(function(resp) {
     let accessToken = resp.access_token
-    let keysJWE = resp.derivedKeyBundle // XXX TODO: in the draft spec this is called "keys_jwe"
+    let keysJWE = resp.keys_jwe
     return decryptJWE(savedState.privateJWK, keysJWE).then(function(plaintext) {
       return {
         access_token: accessToken,

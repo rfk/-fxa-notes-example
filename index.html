@@ -34,7 +34,7 @@ $(function() {
 
 function beginOAuthFlow() {
   let state = randomString(16)
-  let codeVerifier = randomString(32)
+  let codeVerifier = randomString(64)
   return generateEphemeralKeypair().then(function(keypair) {
     return sha256(codeVerifier).then(function(codeChallenge) {
       localStorage["inflight-oauth-state"] = JSON.stringify({

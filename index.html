@@ -5,13 +5,7 @@
         crossorigin="anonymous"></script>
 <script type="text/javascript">
 
-// Ideally we'd auto-discover the various OAuth endpoints but
-// the FxA .well-known/openid-configuration file is not readable
-// cross-origin: https://github.com/mozilla/fxa-content-server/issues/5453
-//var ACCOUNT_SERVER = "https://scoped-keys.dev.lcip.org/"
-const AUTHORIZATION_ENDPOINT = "https://oauth-scoped-keys-oct10.dev.lcip.org/v1/authorization"
-const TOKEN_ENDPOINT = "https://oauth-scoped-keys-oct10.dev.lcip.org/v1/token"
-
+const IDP = "https://latest-keys.dev.lcip.org"
 const CLIENT_ID = "82fdfa37698f256c"
 const SCOPES = "profile https://identity.mozilla.org/apps/notes"
 
@@ -33,23 +27,25 @@ $(function() {
 
 
 function beginOAuthFlow() {
-  let state = randomString(16)
-  let codeVerifier = randomString(64)
-  return generateEphemeralKeypair().then(function(keypair) {
-    return sha256(codeVerifier).then(function(codeChallenge) {
-      localStorage["inflight-oauth-state"] = JSON.stringify({
-        state: state,
-        codeVerifier: codeVerifier,
-        privateJWK: keypair.privateJWK
+  return discoverOAuthConfig().then(function(config) {
+    let state = randomString(16)
+    let codeVerifier = randomString(64)
+    return generateEphemeralKeypair().then(function(keypair) {
+      return sha256(codeVerifier).then(function(codeChallenge) {
+        localStorage["inflight-oauth-state"] = JSON.stringify({
+          state: state,
+          codeVerifier: codeVerifier,
+          privateJWK: keypair.privateJWK
+        })
+        window.location = config.authorization_endpoint + "?" + [
+          "client_id=" + CLIENT_ID,
+          "scope=" + escape(SCOPES),
+          "state=" + state,
+          "code_challenge=" + b64Encode(codeChallenge),
+          "code_challenge_method=S256",
+          "keys_jwk=" + b64Encode(JSON.stringify(keypair.publicJWK))
+        ].join("&")
       })
-      window.location = AUTHORIZATION_ENDPOINT + "?" + [
-        "client_id=" + CLIENT_ID,
-        "scope=" + escape(SCOPES),
-        "state=" + state,
-        "code_challenge=" + b64Encode(codeChallenge),
-        "code_challenge_method=S256",
-        "keys_jwk=" + b64Encode(JSON.stringify(keypair.publicJWK))
-      ].join("&")
     })
   })
 }
@@ -71,22 +67,29 @@ function completeOAuthFlow() {
   savedState = JSON.parse(savedState)
   if (savedState.state !== params.state) { throw new Error("invalid 'state' parameter") }
 
-  // Exchange the authorization code for a token and keys bundle.
-  return $.post(TOKEN_ENDPOINT, {
-    client_id: CLIENT_ID,
-    grant_type: 'authorization_code',
-    code: params.code,
-    code_verifier: savedState.codeVerifier
-  }).then(function(resp) {
-    let accessToken = resp.access_token
-    let keysJWE = resp.keys_jwe
-    return decryptJWE(savedState.privateJWK, keysJWE).then(function(plaintext) {
-      return {
-        access_token: accessToken,
-        keys: JSON.parse(plaintext)
-      }
-    })
-  })
+  return discoverOAuthConfig().then(function(config) {
+    // Exchange the authorization code for a token and keys bundle.
+    return $.post(config.token_endpoint, {
+      client_id: CLIENT_ID,
+      grant_type: 'authorization_code',
+      code: params.code,
+      code_verifier: savedState.codeVerifier
+    }).then(function(resp) {
+      let accessToken = resp.access_token
+      let keysJWE = resp.keys_jwe
+      return decryptJWE(savedState.privateJWK, keysJWE).then(function(plaintext) {
+        return {
+          access_token: accessToken,
+          keys: JSON.parse(plaintext)
+        }
+      })
+   })
+ })
+}
+
+
+function discoverOAuthConfig() {
+  return $.get(IDP + '/.well-known/openid-configuration')
 }
 
 
